@@ -33,7 +33,7 @@ from src.utils import ensure_dir, save_threshold_stats, rr_summary
 # MIT-BIH records considered predominantly "normal sinus rhythm"
 # These records have mostly normal beats, suitable for training a healthy baseline.
 # Full list of MIT-BIH records: 100–234 (not all numbers exist)
-HEALTHY_RECORDS = ["100", "101", "103", "105", "106"]
+HEALTHY_RECORDS = ["100", "101", "103"]
 
 # Where to save model artifacts
 MODEL_DIR = "models"
