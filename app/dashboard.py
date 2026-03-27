@@ -1,23 +1,20 @@
 """
 dashboard.py
 ------------
-Streamlit dashboard for Real-Time Arrhythmia Detection using HMM.
-
-Run with:
-  streamlit run app/dashboard.py
-
+Final Presentation Version with Fixed UI/CSS. 
 Features:
-  - Select a MIT-BIH record ID to analyze
-  - View the filtered ECG waveform
-  - View the RR interval sequence
-  - See the HMM likelihood score
-  - Get a classification: Normal or Possible Arrhythmia
+  - High-contrast CSS for Metric visibility.
+  - Blind Patient Simulation (No Spoilers).
+  - Realistic P-QRS-T Waveform Plotting.
+  - Hospital-Style Continuous ECG Monitor.
 """
 
 import os
 import sys
 import numpy as np
 import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # Add project root to import path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,212 +22,129 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data_loader import load_record
 from src.preprocessing import filter_ecg
 from src.feature_extraction import extract_rr_sequence
-from src.hmm_model import load_model, compute_likelihood, classify
+from src.hmm_model import load_model, compute_likelihood, diagnose_rhythm
 from src.utils import load_threshold_stats
 from src.visualization import plot_ecg_segment, plot_rr_only
+from src.simulated_data import generate_random_patient, create_realistic_ecg
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Arrhythmia Detector — HMM",
-    page_icon="🫀",
-    layout="wide"
-)
+st.set_page_config(page_title="Clinical Cardiac Monitor", page_icon="🫀", layout="wide")
 
-# ─── Custom CSS ───────────────────────────────────────────────────────────────
+# ─── Custom CSS for UI Visibility ─────────────────────────────────────────────
 st.markdown("""
 <style>
+    /* Force main background and text colors */
     .main { background-color: #0d1117; color: #e6edf3; }
-    .metric-box {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 20px;
-        text-align: center;
+    
+    /* Fix Metric Box Visibility */
+    [data-testid="stMetricValue"] {
+        color: #ffffff !important;
+        font-size: 1.8rem !important;
     }
-    .result-normal {
-        color: #00d4aa;
-        font-size: 2em;
-        font-weight: bold;
-        text-align: center;
+    [data-testid="stMetricLabel"] {
+        color: #8b949e !important;
+        font-size: 1rem !important;
     }
-    .result-abnormal {
-        color: #ff6b6b;
-        font-size: 2em;
-        font-weight: bold;
-        text-align: center;
+    [data-testid="stMetricDelta"] {
+        font-weight: bold !important;
     }
+    
+    /* Container styling */
+    div[data-testid="stMetric"] {
+        background-color: #161b22 !important;
+        border: 1px solid #30363d !important;
+        border-radius: 10px !important;
+        padding: 15px !important;
+    }
+
+    /* Fix sidebar text */
+    .css-1d391kg { color: #e6edf3; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─── Header ───────────────────────────────────────────────────────────────────
-st.title("🫀 Real-Time Arrhythmia Detection")
-st.caption("Using Hidden Markov Models trained on MIT-BIH Arrhythmia Database")
+st.title("🏥 Real-Time Clinical ECG Monitor")
+st.caption("Autonomous HMM Diagnostic Pipeline for Arrhythmia Detection")
 st.divider()
 
-# ─── Sidebar Controls ─────────────────────────────────────────────────────────
+# ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("📋 Input Source")
+    source_type = st.radio("System Mode", ["MIT-BIH Database", "Live Patient Simulation"])
 
-    # Record selector
-    record_id = st.selectbox(
-        "Select MIT-BIH Record",
-        options=["100", "101", "103", "105", "108", "200", "207", "214"],
-        help=(
-            "100/101/103 → Normal sinus rhythm\n"
-            "108 → PVCs (arrhythmia)\n"
-            "200 → Mixed arrhythmia\n"
-            "207 → Complete heart block"
-        )
-    )
-
-    ecg_window = st.slider(
-        "ECG Window (seconds)",
-        min_value=5,
-        max_value=30,
-        value=10,
-        step=5,
-        help="How many seconds of ECG to display"
-    )
-
-    run_button = st.button("▶ Run Analysis", use_container_width=True)
+    if source_type == "MIT-BIH Database":
+        record_id = st.selectbox("Patient Record", ["100", "101", "103", "108", "200", "207"])
+    else:
+        st.success("🎲 **Autonomous Blind Mode Active**")
+        st.info("The system will generate a physiologically possible heartbeat. Diagnosis is hidden until analysis.")
 
     st.divider()
-    st.markdown("**Model Files Required:**")
-    st.code("models/hmm_model.pkl\nmodels/threshold_stats.json")
-    st.caption("Run `python src/train.py` first to generate these files.")
+    ecg_window = st.slider("Monitor Window (sec)", 5, 20, 10)
+    run_button = st.button("▶ START MONITORING", use_container_width=True)
 
-# ─── Main Analysis ────────────────────────────────────────────────────────────
-
+# ─── Analysis Execution ───────────────────────────────────────────────────────
 MODEL_PATH = "models/hmm_model.pkl"
 STATS_PATH = "models/threshold_stats.json"
 
-
-def check_model_exists():
-    return os.path.exists(MODEL_PATH) and os.path.exists(STATS_PATH)
-
-
 if not run_button:
-    # Landing state
-    st.info("👈 Select a record from the sidebar and click **Run Analysis** to begin.")
-    st.markdown("""
-    ### How It Works
-    1. **Load** — ECG signal fetched from PhysioNet (MIT-BIH database)
-    2. **Filter** — Butterworth bandpass filter removes noise (0.5–45 Hz)
-    3. **Extract** — RR intervals computed from cardiologist-annotated R-peaks
-    4. **Score** — Trained HMM computes log-likelihood of the RR sequence
-    5. **Classify** — Compare score against threshold learned from healthy ECGs
-    """)
-
+    st.info("👈 Configure system mode and press **START MONITORING**.")
+    st.image("https://upload.wikimedia.org/wikipedia/commons/9/9e/Sinus_rhythm_labels.svg", width=500)
 else:
-    # ── Check for trained model ───────────────────────────────────────────────
-    if not check_model_exists():
-        st.error(
-            "❌ Trained model not found. "
-            "Please run `python src/train.py` first to train the HMM."
-        )
+    # Check for model files
+    if not (os.path.exists(MODEL_PATH) and os.path.exists(STATS_PATH)):
+        st.error("❌ Model not found. Please run `python src/train.py` first.")
         st.stop()
 
-    # ── Load model ────────────────────────────────────────────────────────────
-    with st.spinner("Loading model..."):
-        model = load_model(MODEL_PATH)
-        stats = load_threshold_stats(STATS_PATH)
-        threshold = stats["threshold"]
-        mean_ll = stats["mean_log_likelihood"]
+    # Load System Brain
+    model = load_model(MODEL_PATH)
+    stats = load_threshold_stats(STATS_PATH)
+    threshold = stats["threshold"]
 
-    # ── Load and process ECG ──────────────────────────────────────────────────
-    with st.spinner(f"Downloading record {record_id} from PhysioNet..."):
-        try:
+    # 1. Data Acquisition
+    if source_type == "MIT-BIH Database":
+        with st.spinner("Fetching Clinical Data..."):
             signal, r_peaks, fs = load_record(record_id)
-        except Exception as e:
-            st.error(f"Could not load record {record_id}: {e}")
-            st.stop()
-
-    with st.spinner("Processing ECG signal..."):
-        filtered_signal = filter_ecg(signal, fs)
-        rr = extract_rr_sequence(r_peaks, fs, filter_outliers=True)
-
-    if len(rr) == 0:
-        st.error("No valid RR intervals found in this record.")
-        st.stop()
-
-    # ── Compute classification ────────────────────────────────────────────────
-    log_likelihood = compute_likelihood(model, rr)
-    label = classify(log_likelihood, threshold)
-
-    # ── Display Result ────────────────────────────────────────────────────────
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            label="Log-Likelihood",
-            value=f"{log_likelihood:.4f}",
-            delta=f"{log_likelihood - threshold:.4f} vs threshold",
-            delta_color="normal" if label == "Normal" else "inverse"
-        )
-
-    with col2:
-        st.metric(
-            label="Threshold",
-            value=f"{threshold:.4f}",
-            help="Mean - 2×Std of training log-likelihoods"
-        )
-
-    with col3:
-        st.metric(
-            label="Mean Heart Rate",
-            value=f"{60.0 / np.mean(rr):.1f} BPM",
-            help="Based on mean RR interval"
-        )
-
-    # ── Classification Banner ─────────────────────────────────────────────────
-    st.divider()
-
-    if label == "Normal":
-        st.success("✅  NORMAL — No arrhythmia detected. "
-                   "RR interval pattern is consistent with the trained healthy model.")
+            filtered_signal = filter_ecg(signal, fs)
+            rr = extract_rr_sequence(r_peaks, fs)
     else:
-        st.error("⚠️  POSSIBLE ARRHYTHMIA — RR interval pattern deviates significantly "
-                 "from the learned healthy baseline. Manual review recommended.")
+        with st.spinner("Simulating Live Patient..."):
+            # Randomly generated but physiologically possible
+            rr, _ = generate_random_patient(n_beats=60)
+            fs = 360
+            # Realistic P-QRS-T stitching
+            filtered_signal, r_peaks = create_realistic_ecg(rr, fs)
 
-    st.divider()
+    # 2. HMM & Rule-Based Diagnosis
+    log_likelihood = compute_likelihood(model, rr)
+    diagnosis = diagnose_rhythm(rr, log_likelihood, threshold)
 
-    # ── Plots ─────────────────────────────────────────────────────────────────
-    st.subheader("ECG Signal")
-    st.caption(f"First {ecg_window}s — Butterworth filtered (0.5–45 Hz) | "
-               f"Red dots = R-peaks")
-    ecg_fig = plot_ecg_segment(
-        filtered_signal, r_peaks, fs,
-        max_seconds=ecg_window,
-        title=f"Record {record_id} — Filtered ECG"
-    )
-    st.pyplot(ecg_fig)
+    # 3. Clinical Metrics (Explicitly formatted for visibility)
+    m1, m2, m3 = st.columns(3)
+    m1.metric(label="Log-Likelihood Score", value=f"{log_likelihood:.3f}", delta=f"{log_likelihood-threshold:.3f}")
+    m2.metric(label="Detection Threshold", value=f"{threshold:.3f}")
+    m3.metric(label="Calculated HR", value=f"{60.0/np.mean(rr):.1f} BPM")
 
-    st.subheader("RR Interval Sequence")
-    st.caption(f"{len(rr)} RR intervals | Mean = {np.mean(rr):.3f}s | "
-               f"Std = {np.std(rr):.3f}s")
-    rr_fig = plot_rr_only(rr, label=label, title=f"Record {record_id} — RR Intervals")
-    st.pyplot(rr_fig)
+    # 4. Diagnostic Reveal Banner
+    st.write("---")
+    if "Normal" in diagnosis:
+        st.success(f"### ✅ CLINICAL STATUS: {diagnosis.upper()}")
+    else:
+        st.error(f"### ⚠️ CLINICAL STATUS: {diagnosis.upper()}")
+    st.write("---")
 
-    # ── RR Stats Table ─────────────────────────────────────────────────────────
-    st.subheader("RR Interval Statistics")
-    bpm = 60.0 / rr
-    stats_dict = {
-        "Metric": ["Count", "Mean RR (s)", "Std RR (s)", "Min RR (s)",
-                   "Max RR (s)", "Mean HR (BPM)", "Min HR (BPM)", "Max HR (BPM)"],
-        "Value": [
-            len(rr),
-            f"{np.mean(rr):.3f}",
-            f"{np.std(rr):.3f}",
-            f"{np.min(rr):.3f}",
-            f"{np.max(rr):.3f}",
-            f"{np.mean(bpm):.1f}",
-            f"{np.min(bpm):.1f}",
-            f"{np.max(bpm):.1f}"
-        ]
-    }
-    import pandas as pd
-    st.dataframe(
-        pd.DataFrame(stats_dict),
-        use_container_width=True,
-        hide_index=True
-    )
+    # 5. The Heartbeat Plot (Hospital Style Continuous Line)
+    st.subheader("📺 Real-Time ECG Waveform")
+    fig_ecg = plot_ecg_segment(filtered_signal, r_peaks, fs, max_seconds=ecg_window)
+    st.pyplot(fig_ecg)
+
+    # 6. Temporal Analysis (RR Bar Graph)
+    st.subheader("📊 RR Interval Temporal Analysis")
+    fig_rr = plot_rr_only(rr, label="Normal" if "Normal" in diagnosis else "Abnormal")
+    st.pyplot(fig_rr)
+
+    # 7. Data Breakdown
+    with st.expander("Show Statistical Breakdown"):
+        st.table(pd.DataFrame({
+            "Metric": ["Mean RR (s)", "Std Deviation (s)", "Min RR (s)", "Max RR (s)"],
+            "Value": [f"{np.mean(rr):.3f}", f"{np.std(rr):.3f}", f"{np.min(rr):.3f}", f"{np.max(rr):.3f}"]
+        }))
